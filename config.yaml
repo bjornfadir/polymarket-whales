@@ -15,4 +15,8 @@ telegram:
   chat_id: "YOUR_CHAT_ID"
 
 polymarket:
-  api_url: "https://clob.polymarket.com"
+  # bjornfadir fork, 2026-08-23: clob.polymarket.com/trades now requires an
+  # API key and 401s without one. data-api.polymarket.com/trades is the
+  # current public, unauthenticated equivalent -- see main.py's load_config()
+  # for the full note.
+  api_url: "https://data-api.polymarket.com"

@@ -50,7 +50,13 @@ def load_config(path: str = "config.yaml") -> dict:
             "webhook_url": "",
         },
         "polymarket": {
-            "api_url": "https://clob.polymarket.com",
+            # NOTE (bjornfadir fork, 2026-08-23): clob.polymarket.com/trades now
+            # requires an API key ("Unauthorized/Invalid api key") -- this repo
+            # was last touched 2026-03-20 and broke silently sometime after.
+            # data-api.polymarket.com/trades is the current public, unauthenticated
+            # equivalent, and includes the market title inline (no second Gamma
+            # API call needed per trade). See fetch_recent_trades()/get_market_title().
+            "api_url": "https://data-api.polymarket.com",
         },
     }
 
@@ -82,7 +88,7 @@ def load_config(path: str = "config.yaml") -> dict:
 # Polymarket API
 # ─────────────────────────────────────────────
 def fetch_recent_trades(api_url: str, limit: int = 100) -> list:
-    """Fetch recent trades from Polymarket CLOB API."""
+    """Fetch recent trades from the Polymarket public data API."""
     url = f"{api_url}/trades"
     params = {"limit": limit}
     try:
@@ -92,7 +98,7 @@ def fetch_recent_trades(api_url: str, limit: int = 100) -> list:
         # The CLOB API returns {"data": [...], "next_cursor": ...}
         if isinstance(data, dict) and "data" in data:
             return data["data"]
-        # Some endpoints return a list directly
+        # data-api.polymarket.com/trades (current default) returns a list directly
         if isinstance(data, list):
             return data
         return []
@@ -113,6 +119,8 @@ def fetch_recent_trades(api_url: str, limit: int = 100) -> list:
 def fetch_market_info(condition_id: str) -> dict:
     """
     Fetch market metadata (title, etc.) from Polymarket Gamma API.
+    Fallback only -- data-api.polymarket.com/trades (current default source)
+    already includes 'title' inline, so this is rarely called now.
     Returns a dict with at least 'question' key.
     """
     url = "https://gamma-api.polymarket.com/markets"
@@ -151,7 +159,8 @@ def parse_trade_usd_size(trade: dict) -> float:
 
 
 def format_side(side: str) -> str:
-    """Normalize side string to YES/NO."""
+    """Normalize side/outcome string to YES/NO (or pass through non-binary
+    outcome labels like UP/DOWN uppercased, e.g. 5-minute BTC up/down markets)."""
     s = str(side).upper()
     if s in ("YES", "BUY", "1"):
         return "YES"
@@ -161,8 +170,15 @@ def format_side(side: str) -> str:
 
 
 def trade_unique_id(trade: dict) -> str:
-    """Generate a unique identifier for a trade to avoid duplicate alerts."""
-    return trade.get("id") or trade.get("trade_id") or str(trade)
+    """Generate a unique identifier for a trade to avoid duplicate alerts.
+    data-api.polymarket.com/trades (current default source) has no 'id'/'trade_id'
+    field -- each fill's 'transactionHash' is the actual unique key there."""
+    return (
+        trade.get("transactionHash")
+        or trade.get("id")
+        or trade.get("trade_id")
+        or str(trade)
+    )
 
 
 # ─────────────────────────────────────────────
@@ -283,7 +299,7 @@ def export_trade(file_path: str, trade_data: dict) -> None:
         return
 
     ext = os.path.splitext(file_path)[1].lower()
-    
+
     if ext == ".csv":
         file_exists = os.path.isfile(file_path)
         with open(file_path, "a", newline="") as f:
@@ -299,7 +315,7 @@ def export_trade(file_path: str, trade_data: dict) -> None:
                     all_data = json.load(f)
             except (json.JSONDecodeError, ValueError):
                 all_data = []
-        
+
         all_data.append(trade_data)
         with open(file_path, "w") as f:
             json.dump(all_data, f, indent=2)
@@ -395,8 +411,16 @@ def run(config: dict, export_path: str = None) -> None:
             whale_count += 1
 
             # Get trade details
-            condition_id = trade.get("market") or trade.get("condition_id", "")
-            side_raw = trade.get("side", trade.get("outcome", ""))
+            condition_id = (
+                trade.get("conditionId")
+                or trade.get("market")
+                or trade.get("condition_id", "")
+            )
+            # data-api.polymarket.com trades carry the resolved outcome label
+            # (e.g. "Yes"/"No", or "Up"/"Down" for scalar-style markets) in
+            # 'outcome' -- 'side' there is just BUY/SELL order direction, not
+            # the position taken, so prefer 'outcome' when present.
+            side_raw = trade.get("outcome") or trade.get("side", "")
             side = format_side(side_raw)
             price = float(trade.get("price", 0))
             ts_raw = trade.get("timestamp") or trade.get("created_at", "")
@@ -413,8 +437,11 @@ def run(config: dict, export_path: str = None) -> None:
             else:
                 ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-            # Fetch market title
-            market_title = get_market_title(condition_id) if condition_id else "Unknown Market"
+            # Fetch market title — data-api trades already include 'title' inline;
+            # only fall back to the Gamma API lookup if it's ever missing.
+            market_title = trade.get("title") or (
+                get_market_title(condition_id) if condition_id else "Unknown Market"
+            )
 
             # Print terminal alert
             print(format_terminal_alert(market_title, side, amount_usd, price, ts))
